@@ -1,300 +1,197 @@
 const express = require('express');
-const { body, validationResult } = require('express-validator');
-const repositories = require('./repositories');
-const {
-    toProfileInput,
-    toTechnologyInput,
-    toProjectInput,
-    toFeedbackInput,
-    toProfileResponse,
-    toTechnologyResponse,
-    toProjectResponse,
-    toFeedbackResponse
-} = require('./dtos');
+const { PrismaClient } = require('@prisma/client');
+const { body, validationResult, query } = require('express-validator');
+const swaggerUi = require('swagger-ui-express');
+const swaggerJsdoc = require('swagger-jsdoc');
+const dtos = require('./dtos');
 
 const app = express();
-
-const PORT = 3000;
-
+const prisma = new PrismaClient();
 app.use(express.json());
 
-// Rota inicial
-app.get('/', (req, res) => {
-    res.json({
-        message: 'DevShowcase API funcionando!'
+// =====================================================
+// CONFIGURAÇÃO DO SWAGGER (DOCUMENTAÇÃO INTERATIVA)
+// =====================================================
+const swaggerOptions = {
+    definition: {
+        openapi: '3.0.0',
+        info: {
+            title: 'DevShowcase API',
+            version: '1.0.0',
+            description: 'Documentação interativa da API DevShowcase - Etapa Final',
+            contact: { name: 'Marcos, Adriano e Washington' }
+        },
+        servers: [{ url: 'http://localhost:3000', description: 'Servidor Local' }]
+    },
+    apis: ['./server.js']
+};
+const swaggerDocs = swaggerJsdoc(swaggerOptions);
+app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDocs));
+
+// =====================================================
+// ENDPOINTS E ROTAS
+// =====================================================
+
+/**
+ * @openapi
+ * /api/projects:
+ *   get:
+ *     summary: Lista projetos com paginação e filtro por tecnologia
+ *     responses:
+ *       200:
+ *         description: Sucesso
+ */
+app.get('/api/projects', [
+    query('page').optional().isInt({ min: 1 }).toInt(),
+    query('limit').optional().isInt({ min: 1 }).toInt(),
+    query('tech').optional().isString()
+], async (req, res, next) => {
+    try {
+        const errors = validationResult(req);
+        if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
+        const page = req.query.page || 1;
+        const limit = req.query.limit || 5;
+        const skip = (page - 1) * limit;
+        const techName = req.query.tech;
+
+        const whereClause = techName ? {
+            technologies: { some: { name: { equals: techName, mode: 'insensitive' } } }
+        } : {};
+
+        const projects = await prisma.project.findMany({
+            where: whereClause,
+            skip: skip,
+            take: limit,
+            include: { profile: true, technologies: true, feedbacks: true }
+        });
+
+        res.json(projects.map(dtos.toProjectResponse));
+    } catch (err) { next(err); }
+});
+
+/**
+ * @openapi
+ * /api/projects/{id}/feedbacks:
+ *   post:
+ *     summary: Cadastra um feedback avaliativo e atualiza a média do projeto
+ *     responses:
+ *       201:
+ *         description: Criado
+ */
+app.post('/api/projects/:id/feedbacks', [
+    body('author').notEmpty().withMessage('O autor é obrigatório.'),
+    body('comment').notEmpty().withMessage('O comentário é obrigatório.'),
+    body('rating').isInt({ min: 1, max: 5 }).withMessage('A nota deve ser um número inteiro de 1 a 5.')
+], async (req, res, next) => {
+    try {
+        const errors = validationResult(req);
+        if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
+        const projectId = Number(req.params.id);
+        const { author, comment, rating } = req.body;
+
+        const projectExists = await prisma.project.findUnique({ where: { id: projectId } });
+        if (!projectExists) {
+            const error = new Error('Projeto não encontrado.');
+            error.status = 404;
+            throw error;
+        }
+
+        const newFeedback = await prisma.feedback.create({
+            data: { author, comment, rating, projectId }
+        });
+
+        const allFeedbacks = await prisma.feedback.findMany({ where: { projectId } });
+        const sum = allFeedbacks.reduce((acc, f) => acc + f.rating, 0);
+        const average = sum / allFeedbacks.length;
+
+        await prisma.project.update({
+            where: { id: projectId },
+            data: { averageRating: parseFloat(average.toFixed(1)) }
+        });
+
+        res.status(201).json(dtos.toFeedbackResponse(newFeedback));
+    } catch (err) { next(err); }
+});
+
+/**
+ * @openapi
+ * /api/projects/{id}/upvote:
+ *   put:
+ *     summary: Incrementa o número de curtidas/estrelas do projeto
+ *     responses:
+ *       200:
+ *         description: Atualizado com sucesso
+ */
+app.put('/api/projects/:id/upvote', async (req, res, next) => {
+    try {
+        const projectId = Number(req.params.id);
+
+        const projectExists = await prisma.project.findUnique({ where: { id: projectId } });
+        if (!projectExists) {
+            const error = new Error('Projeto não encontrado.');
+            error.status = 404;
+            throw error;
+        }
+
+        const updatedProject = await prisma.project.update({
+            where: { id: projectId },
+            data: { upvotes: { increment: 1 } },
+            include: { profile: true, technologies: true, feedbacks: true }
+        });
+
+        res.json(dtos.toProjectResponse(updatedProject));
+    } catch (err) { next(err); }
+});
+
+// Mantendo endpoints base necessários para criar os dados de testes
+app.post('/api/profiles', [
+    body('name').notEmpty(),
+    body('email').isEmail()
+], async (req, res, next) => {
+    try {
+        const errors = validationResult(req);
+        if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+        const newProfile = await prisma.profile.create({ data: dtos.toProfileInput(req.body) });
+        res.status(201).json(dtos.toProfileResponse(newProfile));
+    } catch (err) { next(err); }
+});
+
+app.post('/api/technologies', [body('name').notEmpty()], async (req, res, next) => {
+    try {
+        const errors = validationResult(req);
+        if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+        const newTech = await prisma.technology.create({ data: dtos.toTechnologyInput(req.body) });
+        res.status(201).json(dtos.toTechnologyResponse(newTech));
+    } catch (err) { next(err); }
+});
+
+app.post('/api/projects', [body('title').notEmpty(), body('url').isURL()], async (req, res, next) => {
+    try {
+        const errors = validationResult(req);
+        if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+        const { technologyIds, ...projectData } = dtos.toProjectInput(req.body);
+        const newProj = await prisma.project.create({
+            data: { ...projectData, technologies: { connect: technologyIds.map(id => ({ id })) } }
+        });
+        res.status(201).json(dtos.toProjectResponse(newProj));
+    } catch (err) { next(err); }
+});
+
+// =====================================================
+// 🛡️ TRATAMENTO GLOBAL DE EXCEÇÕES E ERROS (MIDDLEWARE)
+// =====================================================
+app.use((err, req, res, next) => {
+    const statusCode = err.status || 500;
+    console.error(`[Erro na API]: ${err.message}`);
+    
+    res.status(statusCode).json({
+        status: statusCode,
+        error: statusCode === 404 ? 'Not Found' : 'Internal Server Error',
+        message: err.message || 'Ocorreu um erro interno inesperado no servidor.'
     });
 });
 
-// POST /api/profiles - Criar perfil
-app.post(
-    '/api/profiles',
-    [
-        body('name')
-            .trim()
-            .notEmpty()
-            .withMessage('O nome é obrigatório.'),
-
-        body('email')
-            .trim()
-            .isEmail()
-            .withMessage('Informe um e-mail válido.'),
-
-        body('avatarUrl')
-            .optional({ checkFalsy: true })
-            .trim()
-            .isURL({ protocols: ['http', 'https'], require_protocol: true })
-            .withMessage('Informe uma URL de avatar válida.')
-    ],
-    async (req, res) => {
-        const errors = validationResult(req);
-
-        if (!errors.isEmpty()) {
-            return res.status(400).json({
-                errors: errors.array()
-            });
-        }
-
-        const data = toProfileInput(req.body);
-
-        try {
-            const profile = await repositories.createProfile(data);
-
-            return res.status(201).json(toProfileResponse(profile));
-        } catch (error) {
-            if (error.code === 'P2002') {
-                return res.status(409).json({
-                    message: 'Este e-mail já está cadastrado.'
-                });
-            }
-
-            console.error(error);
-
-            return res.status(500).json({
-                message: 'Erro interno ao criar o perfil.'
-            });
-        }
-    }
-);
-
-// GET /api/profiles/:id - Consultar perfil por ID
-app.get('/api/profiles/:id', async (req, res) => {
-    const id = Number(req.params.id);
-
-    if (!Number.isInteger(id) || id <= 0) {
-        return res.status(400).json({
-            message: 'ID inválido.'
-        });
-    }
-
-    try {
-        const profile = await repositories.findProfileById(id);
-
-        if (!profile) {
-            return res.status(404).json({
-                message: 'Perfil não encontrado.'
-            });
-        }
-
-        return res.json(toProfileResponse(profile));
-    } catch (error) {
-        console.error(error);
-
-        return res.status(500).json({
-            message: 'Erro interno ao consultar o perfil.'
-        });
-    }
-});
-
-// POST /api/technologies - Cadastrar tecnologia
-app.post(
-    '/api/technologies',
-    [
-        body('name')
-            .trim()
-            .notEmpty()
-            .withMessage('O nome da tecnologia é obrigatório.')
-    ],
-    async (req, res) => {
-        const errors = validationResult(req);
-
-        if (!errors.isEmpty()) {
-            return res.status(400).json({
-                errors: errors.array()
-            });
-        }
-
-        const data = toTechnologyInput(req.body);
-
-        try {
-            const technology = await repositories.createTechnology(data);
-
-            return res.status(201).json(toTechnologyResponse(technology));
-        } catch (error) {
-            if (error.code === 'P2002') {
-                return res.status(409).json({
-                    message: 'Esta tecnologia já está cadastrada.'
-                });
-            }
-
-            console.error(error);
-
-            return res.status(500).json({
-                message: 'Erro interno ao cadastrar a tecnologia.'
-            });
-        }
-    }
-);
-
-// GET /api/technologies - Listar tecnologias
-app.get('/api/technologies', async (req, res) => {
-    try {
-        const technologies = await repositories.listTechnologies();
-
-        return res.json(technologies.map(toTechnologyResponse));
-    } catch (error) {
-        console.error(error);
-
-        return res.status(500).json({
-            message: 'Erro interno ao consultar as tecnologias.'
-        });
-    }
-});
-
-// POST /api/projects - Cadastrar projeto
-app.post(
-    '/api/projects',
-    [
-        body('title')
-            .trim()
-            .notEmpty()
-            .withMessage('O título do projeto é obrigatório.'),
-
-        body('url')
-            .trim()
-            .isURL({ protocols: ['http', 'https'], require_protocol: true })
-            .withMessage('Informe uma URL válida.'),
-
-        body('profileId')
-            .isInt({ min: 1 })
-            .withMessage('Informe um ID de perfil válido.'),
-
-        body('technologyIds')
-            .optional()
-            .isArray()
-            .withMessage('technologyIds deve ser uma lista de IDs.'),
-
-        body('technologyIds.*')
-            .isInt({ min: 1 })
-            .withMessage('Cada ID de tecnologia deve ser um número válido.')
-    ],
-    async (req, res) => {
-        const errors = validationResult(req);
-
-        if (!errors.isEmpty()) {
-            return res.status(400).json({
-                errors: errors.array()
-            });
-        }
-
-        const data = toProjectInput(req.body);
-
-        try {
-            const project = await repositories.createProject(data);
-
-            return res.status(201).json(toProjectResponse(project));
-        } catch (error) {
-            if (error.code === 'P2025') {
-                return res.status(404).json({
-                    message: 'Perfil ou tecnologia não encontrada.'
-                });
-            }
-
-            console.error(error);
-
-            return res.status(500).json({
-                message: 'Erro interno ao cadastrar o projeto.'
-            });
-        }
-    }
-);
-
-// GET /api/projects - Listar projetos
-app.get('/api/projects', async (req, res) => {
-    try {
-        const projects = await repositories.listProjects();
-
-        return res.json(projects.map(toProjectResponse));
-    } catch (error) {
-        console.error(error);
-
-        return res.status(500).json({
-            message: 'Erro interno ao consultar os projetos.'
-        });
-    }
-});
-
-// POST /api/projects/:id/feedbacks - Cadastrar feedback
-app.post(
-    '/api/projects/:id/feedbacks',
-    [
-        body('author')
-            .trim()
-            .notEmpty()
-            .withMessage('O nome do autor é obrigatório.'),
-
-        body('comment')
-            .trim()
-            .notEmpty()
-            .withMessage('O comentário é obrigatório.')
-    ],
-    async (req, res) => {
-        const errors = validationResult(req);
-
-        if (!errors.isEmpty()) {
-            return res.status(400).json({
-                errors: errors.array()
-            });
-        }
-
-        const projectId = Number(req.params.id);
-
-        if (!Number.isInteger(projectId) || projectId <= 0) {
-            return res.status(400).json({
-                message: 'ID do projeto inválido.'
-            });
-        }
-
-        const { author, comment } = toFeedbackInput(req.body);
-
-        try {
-            const feedback = await repositories.createFeedback({
-                projectId,
-                author,
-                comment
-            });
-
-            return res.status(201).json(toFeedbackResponse(feedback));
-        } catch (error) {
-            if (error.code === 'P2025') {
-                return res.status(404).json({
-                    message: 'Projeto não encontrado.'
-                });
-            }
-
-            console.error(error);
-
-            return res.status(500).json({
-                message: 'Erro interno ao cadastrar o feedback.'
-            });
-        }
-    }
-);
-
-app.listen(PORT, (error) => {
-    if (error) {
-        console.error('Erro ao iniciar o servidor:', error.message);
-        return;
-    }
-
-    console.log(`Servidor rodando em http://localhost:${PORT}`);
-});
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));

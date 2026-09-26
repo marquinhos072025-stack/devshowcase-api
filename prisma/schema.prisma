@@ -1,10 +1,10 @@
-generator client {
-  provider = "prisma-client-js"
-}
-
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
 }
 
 model Profile {
@@ -14,28 +14,26 @@ model Profile {
   bio       String?
   avatarUrl String?
   createdAt DateTime  @default(now())
-
   projects  Project[]
 }
 
 model Project {
-  id          Int          @id @default(autoincrement())
-  title       String
-  description String?
-  url         String
-  createdAt   DateTime     @default(now())
-
-  profileId   Int
-  profile     Profile      @relation(fields: [profileId], references: [id])
-
-  technologies Technology[]
-  feedbacks    Feedback[]
+  id            Int          @id @default(autoincrement())
+  title         String
+  description   String?
+  url           String
+  upvotes       Int          @default(0)       // 🌟 Curtidas (Etapa 2)
+  averageRating Float        @default(0.0)     // 📈 Média de notas (Etapa 2)
+  createdAt     DateTime     @default(now())
+  profileId     Int
+  profile       Profile      @relation(fields: [profileId], references: [id])
+  technologies  Technology[]
+  feedbacks     Feedback[]
 }
 
 model Technology {
   id       Int       @id @default(autoincrement())
   name     String    @unique
-
   projects Project[]
 }
 
@@ -43,8 +41,8 @@ model Feedback {
   id        Int      @id @default(autoincrement())
   author    String
   comment   String
+  rating    Int      // ⭐ Nota de 1 a 5 (Etapa 2)
   createdAt DateTime @default(now())
-
   projectId Int
   project   Project  @relation(fields: [projectId], references: [id])
 }
